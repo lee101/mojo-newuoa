@@ -1,0 +1,13 @@
+mojo-newuoa is derived from the NEWUOA C++ header distributed with VCGLib:
+
+https://github.com/cnr-isti-vclab/vcglib/tree/main/wrap/newuoa
+
+NEWUOA was written in Fortran by M. J. D. Powell and translated and adapted
+to C/C++ by Attractive Chaos. The C++ header is licensed under the MIT
+License:
+
+Copyright (c) 2004 M. J. D. Powell <mjdp@cam.ac.uk>
+Copyright (c) 2008 Attractive Chaos <attractivechaos@aol.co.uk>
+
+The upstream license notice and permission text are preserved in
+tests/reference/upstream_newuoa.h.
