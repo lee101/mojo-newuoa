@@ -1,11 +1,12 @@
 """Ports Powell's NEWUOA trust-region optimizer from VCGLib's bundled header."""
 
 from std.math import abs, atan, cos, max, min, sin, sqrt
-from std.memory import Pointer, UnsafePointer
+from std.memory import Pointer
 from std.sys.info import simd_width_of
+from std.utils import StaticTuple
 
 
-comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
+comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime Objective = def(Int, Int, Int) thin abi("C") -> Float64
 comptime W = simd_width_of[DType.float64]()
 comptime TWO_PI = 6.283185307179586476925286766559
@@ -20,7 +21,7 @@ def _ptr(addr: Int) -> Ptr:
 
 
 def _objective(callback_addr: Int, n: Int, x: Ptr, user_data: Int) -> Float64:
-    var opaque = UnsafePointer[NoneType, AnyOrigin[mut=True]](
+    var opaque = Pointer[NoneType, AnyOrigin[mut=True]](
         unsafe_from_address=callback_addr
     )
     var callback = Pointer(to=opaque).unsafe_bitcast[Objective]()[]
@@ -547,9 +548,9 @@ def _bigden(
     wvec: Ptr,
     prod: Ptr,
 ) -> Float64:
-    var den = InlineArray[Float64, 9](fill=0.0)
-    var denex = InlineArray[Float64, 9](fill=0.0)
-    var par = InlineArray[Float64, 9](fill=0.0)
+    var den = StaticTuple[Float64, 9](0.0)
+    var denex = StaticTuple[Float64, 9](0.0)
+    var par = StaticTuple[Float64, 9](0.0)
     var beta = beta_in
     var dd = 0.0
     var ds = 0.0
