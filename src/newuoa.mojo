@@ -12,6 +12,7 @@ comptime W = simd_width_of[DType.float64]()
 comptime TWO_PI = 6.283185307179586476925286766559
 comptime DELTA_DECREASE = 0.5
 comptime RHO_DECREASE = 0.5
+comptime SIMD_MIN_ELEMENTS = 32
 # Keeps every workspace-size product within signed 64-bit Int arithmetic.
 comptime MAX_SAFE_DIMENSION = 30_000
 
@@ -26,6 +27,39 @@ def _objective(callback_addr: Int, n: Int, x: Ptr, user_data: Int) -> Float64:
     )
     var callback = Pointer(to=opaque).unsafe_bitcast[Objective]()[]
     return callback(n, Int(x), user_data)
+
+
+def _dot(n: Int, lhs: Ptr, rhs: Ptr) -> Float64:
+    var total = 0.0
+    var i = 0
+    if n >= SIMD_MIN_ELEMENTS:
+        var accum = lhs.load[width=W](0) * rhs.load[width=W](0)
+        i = W
+        while i + W <= n:
+            accum += lhs.load[width=W](i) * rhs.load[width=W](i)
+            i += W
+        total = accum.reduce_add()
+    while i < n:
+        total += lhs[i] * rhs[i]
+        i += 1
+    return total
+
+
+def _norm_squared(n: Int, values: Ptr) -> Float64:
+    return _dot(n, values, values)
+
+
+def _axpy(n: Int, dst: Ptr, scale: Float64, src: Ptr):
+    var i = 0
+    while n >= SIMD_MIN_ELEMENTS and i + W <= n:
+        dst.store(
+            i,
+            dst.load[width=W](i) + scale * src.load[width=W](i),
+        )
+        i += W
+    while i < n:
+        dst[i] += scale * src[i]
+        i += 1
 
 
 # vcglib: wrap/newuoa/include/newuoa.h trsapp_
@@ -139,9 +173,7 @@ def _trsapp(
             continue
 
         if state == 50:
-            dhd = 0.0
-            for j in range(n):
-                dhd += d[j] * hd[j]
+            dhd = _dot(n, d, hd)
             alpha = bstep
             if dhd > 0.0:
                 temp = dhd / dd
@@ -187,11 +219,8 @@ def _trsapp(
         if state == 90:
             if gg <= ggbeg * 1.0e-4:
                 return crvmin
-            sg = 0.0
-            shs = 0.0
-            for i in range(n):
-                sg += step[i] * g[i]
-                shs += step[i] * hs[i]
+            sg = _dot(n, step, g)
+            shs = _dot(n, step, hs)
             sgk = sg + shs
             angtest = sgk / sqrt(gg * delsq)
             if angtest <= -0.99:
@@ -205,13 +234,9 @@ def _trsapp(
             state = 170
             continue
 
-        dg = 0.0
-        dhd = 0.0
-        dhs = 0.0
-        for i in range(n):
-            dg += d[i] * g[i]
-            dhd += hd[i] * d[i]
-            dhs += hd[i] * step[i]
+        dg = _dot(n, d, g)
+        dhd = _dot(n, hd, d)
+        dhs = _dot(n, hd, step)
         cf = 0.5 * (shs - dhd)
         qbeg = sg + cf
         qsav = qbeg
@@ -293,22 +318,38 @@ def _update(
             )
             tempa = zmat[knew + jl * npt] / temp
             tempb = zmat[knew + j * npt] / temp
-            for i in range(npt):
-                temp = tempa * zmat[i + jl * npt] + tempb * zmat[i + j * npt]
-                zmat[i + j * npt] = (
-                    tempa * zmat[i + j * npt] - tempb * zmat[i + jl * npt]
-                )
-                zmat[i + jl * npt] = temp
+            var i = 0
+            var jl_offset = jl * npt
+            var j_offset = j * npt
+            while npt >= SIMD_MIN_ELEMENTS and i + W <= npt:
+                var zjl = zmat.load[width=W](i + jl_offset)
+                var zj = zmat.load[width=W](i + j_offset)
+                zmat.store(i + j_offset, tempa * zj - tempb * zjl)
+                zmat.store(i + jl_offset, tempa * zjl + tempb * zj)
+                i += W
+            while i < npt:
+                temp = tempa * zmat[i + jl_offset] + tempb * zmat[i + j_offset]
+                zmat[i + j_offset] = tempa * zmat[i + j_offset] - tempb * zmat[i + jl_offset]
+                zmat[i + jl_offset] = temp
+                i += 1
             zmat[knew + j * npt] = 0.0
     tempa = zmat[knew]
     if idz >= 2:
         tempa = -tempa
     if jl > 0:
         tempb = zmat[knew + jl * npt]
-    for i in range(npt):
-        w[i] = tempa * zmat[i]
+    var wi = 0
+    while npt >= SIMD_MIN_ELEMENTS and wi + W <= npt:
+        var wv = tempa * zmat.load[width=W](wi)
         if jl > 0:
-            w[i] += tempb * zmat[i + jl * npt]
+            wv += tempb * zmat.load[width=W](wi + jl * npt)
+        w.store(wi, wv)
+        wi += W
+    while wi < npt:
+        w[wi] = tempa * zmat[wi]
+        if jl > 0:
+            w[wi] += tempb * zmat[wi + jl * npt]
+        wi += 1
     alpha = w[knew]
     tau = vlag[knew]
     tausq = tau * tau
@@ -319,8 +360,17 @@ def _update(
         temp = sqrt(abs(denom))
         tempb = tempa / temp
         tempa = tau / temp
-        for i in range(npt):
-            zmat[i] = tempa * zmat[i] - tempb * vlag[i]
+        var zi = 0
+        while npt >= SIMD_MIN_ELEMENTS and zi + W <= npt:
+            zmat.store(
+                zi,
+                tempa * zmat.load[width=W](zi)
+                - tempb * vlag.load[width=W](zi),
+            )
+            zi += W
+        while zi < npt:
+            zmat[zi] = tempa * zmat[zi] - tempb * vlag[zi]
+            zi += 1
         # The upstream test is preserved literally; sqrt makes temp nonnegative.
         if idz == 1 and temp < 0.0:
             idz = 2
@@ -337,13 +387,34 @@ def _update(
         temp = zmat[knew + ja * npt]
         scala = 1.0 / sqrt(abs(beta) * temp * temp + tausq)
         scalb = scala * sqrt(abs(denom))
-        for i in range(npt):
-            zmat[i + ja * npt] = scala * (
-                tau * zmat[i + ja * npt] - temp * vlag[i]
+        var zi = 0
+        var ja_offset = ja * npt
+        var jb_offset = jb * npt
+        while npt >= SIMD_MIN_ELEMENTS and zi + W <= npt:
+            zmat.store(
+                zi + ja_offset,
+                scala * (
+                    tau * zmat.load[width=W](zi + ja_offset)
+                    - temp * vlag.load[width=W](zi)
+                ),
             )
-            zmat[i + jb * npt] = scalb * (
-                zmat[i + jb * npt] - tempa * w[i] - tempb * vlag[i]
+            zmat.store(
+                zi + jb_offset,
+                scalb * (
+                    zmat.load[width=W](zi + jb_offset)
+                    - tempa * w.load[width=W](zi)
+                    - tempb * vlag.load[width=W](zi)
+                ),
             )
+            zi += W
+        while zi < npt:
+            zmat[zi + ja_offset] = scala * (
+                tau * zmat[zi + ja_offset] - temp * vlag[zi]
+            )
+            zmat[zi + jb_offset] = scalb * (
+                zmat[zi + jb_offset] - tempa * w[zi] - tempb * vlag[zi]
+            )
+            zi += 1
         if denom <= 0.0:
             if beta < 0.0:
                 idz += 1
@@ -351,19 +422,39 @@ def _update(
                 iflag = 1
     if iflag == 1:
         idz -= 1
-        for i in range(npt):
-            temp = zmat[i]
-            zmat[i] = zmat[i + (idz - 1) * npt]
-            zmat[i + (idz - 1) * npt] = temp
+        var zi = 0
+        var swap_offset = (idz - 1) * npt
+        while npt >= SIMD_MIN_ELEMENTS and zi + W <= npt:
+            var za = zmat.load[width=W](zi)
+            var zb = zmat.load[width=W](zi + swap_offset)
+            zmat.store(zi, zb)
+            zmat.store(zi + swap_offset, za)
+            zi += W
+        while zi < npt:
+            temp = zmat[zi]
+            zmat[zi] = zmat[zi + swap_offset]
+            zmat[zi + swap_offset] = temp
+            zi += 1
     for j in range(n):
         var jp = npt + j
         w[jp] = bmat[knew + j * ndim]
         tempa = (alpha * vlag[jp] - tau * w[jp]) / denom
         tempb = (-beta * w[jp] - tau * vlag[jp]) / denom
-        for i in range(jp + 1):
-            bmat[i + j * ndim] += tempa * vlag[i] + tempb * w[i]
-            if i >= npt:
-                bmat[jp + (i - npt) * ndim] = bmat[i + j * ndim]
+        var bi = 0
+        var column = j * ndim
+        while jp + 1 >= SIMD_MIN_ELEMENTS and bi + W <= jp + 1:
+            bmat.store(
+                bi + column,
+                bmat.load[width=W](bi + column)
+                + tempa * vlag.load[width=W](bi)
+                + tempb * w.load[width=W](bi),
+            )
+            bi += W
+        while bi < jp + 1:
+            bmat[bi + column] += tempa * vlag[bi] + tempb * w[bi]
+            bi += 1
+        for i in range(npt, jp + 1):
+            bmat[jp + (i - npt) * ndim] = bmat[i + column]
     return idz
 
 
@@ -418,8 +509,7 @@ def _biglag(
         temp = zmat[knew + j * npt]
         if j + 1 < idz:
             temp = -temp
-        for k in range(npt):
-            hcol[k] += temp * zmat[k + j * npt]
+        _axpy(npt, hcol, temp, zmat + j * npt)
     var alpha = hcol[knew]
     for i in range(n):
         d[i] = xpt[knew + i * npt] - xopt[i]
@@ -1034,9 +1124,7 @@ def _newuob(
                 w + 2 * n,
                 w + 3 * n,
             )
-            dsq = 0.0
-            for i in range(n):
-                dsq += d[i] * d[i]
+            dsq = _norm_squared(n, d)
             dnorm = min(delta, sqrt(dsq))
             if dnorm < 0.5 * rho:
                 knew = -1
@@ -1153,8 +1241,7 @@ def _newuob(
                     sumv = -sumv
                 else:
                     beta -= sumv * sumv
-                for i in range(npt):
-                    vlag[i] += sumv * zmat[i + k * npt]
+                _axpy(npt, vlag, sumv, zmat + k * npt)
             bsum = 0.0
             dx = 0.0
             for j in range(n):
@@ -1237,8 +1324,7 @@ def _newuob(
                         temp *= 0.5
                     vquad += temp * hq[ih]
                     ih += 1
-            for k in range(npt):
-                vquad += pq[k] * w[k]
+            vquad += _dot(npt, pq, w)
             diff = f - fopt - vquad
             diffc = diffb
             diffb = diffa
@@ -1326,8 +1412,7 @@ def _newuob(
                 temp = diff * zmat[knew - 1 + j * npt]
                 if j + 1 < idz:
                     temp = -temp
-                for k in range(npt):
-                    pq[k] += temp * zmat[k + j * npt]
+                _axpy(npt, pq, temp, zmat + j * npt)
             gqsq = 0.0
             for i in range(n):
                 gq[i] += diff * bmat[knew - 1 + i * ndim]

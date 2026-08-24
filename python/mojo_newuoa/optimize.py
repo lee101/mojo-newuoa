@@ -84,24 +84,22 @@ def minimize(
 
     native = lib()
     workspace_size = int(native.mnu_workspace_size(n, points))
-    workspace = np.empty(workspace_size, dtype=np.float64)
-    meta = np.empty(3, dtype=np.float64)
-    callback_error: list[BaseException] = []
-
-    callback_view = x.view()
-    callback_view.setflags(write=False)
+    storage = np.empty(workspace_size + 3, dtype=np.float64)
+    meta_address = storage.ctypes.data + workspace_size * storage.itemsize
+    callback_error: BaseException | None = None
 
     def evaluate(dim: int, address: int, _context: int) -> float:
+        nonlocal callback_error
         try:
             if dim != n or address != x.ctypes.data:
                 raise RuntimeError("native callback supplied an invalid parameter buffer")
-            value = float(fun(callback_view))
+            value = float(fun(x))
             if not np.isfinite(value):
                 raise ValueError("objective must return a finite scalar")
             return value
         except BaseException as exc:
-            if not callback_error:
-                callback_error.append(exc)
+            if callback_error is None:
+                callback_error = exc
             return float("nan")
 
     callback = CALLBACK(evaluate)
@@ -116,21 +114,21 @@ def minimize(
                 float(rhobeg),
                 float(rhoend),
                 evaluation_limit,
-                workspace.ctypes.data,
-                workspace.size,
+                storage.ctypes.data,
+                workspace_size,
                 ctypes.cast(callback, ctypes.c_void_p).value,
                 0,
-                meta.ctypes.data,
-                meta.size,
+                meta_address,
+                3,
             )
         )
     finally:
         x.setflags(write=True)
-    if callback_error:
-        raise callback_error[0]
+    if callback_error is not None:
+        raise callback_error
     if status != 0:
         raise RuntimeError(_ERRORS.get(status, f"NEWUOA failed with status {status}"))
-    nfev = int(meta[1])
+    nfev = int(storage[workspace_size + 1])
     message = (
         "maximum function evaluations reached"
         if nfev >= evaluation_limit
@@ -138,7 +136,7 @@ def minimize(
     )
     return OptimizeResult(
         x=x,
-        fun=float(meta[0]),
+        fun=float(storage[workspace_size]),
         nfev=nfev,
         success=nfev < evaluation_limit,
         status=0 if nfev < evaluation_limit else 1,

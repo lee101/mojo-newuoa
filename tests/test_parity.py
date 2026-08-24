@@ -124,7 +124,10 @@ def test_every_valid_custom_interpolation_count_matches_upstream(
     assert abs(actual.nfev - expected_calls) <= 10
 
 
-@pytest.mark.parametrize(("n", "npt"), [(3, 7), (4, 9), (5, 11)])
+@pytest.mark.parametrize(
+    ("n", "npt"),
+    [(3, 7), (4, 9), (5, 11), (15, 32), (16, 33)],
+)
 def test_simd_remainder_dimensions_match_upstream(reference_minimize, n, npt):
     x0 = np.linspace(-2.0, 3.0, n)
     expected_x, expected_fun, expected_calls = reference_minimize(

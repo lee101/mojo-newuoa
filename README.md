@@ -79,38 +79,40 @@ scale of a useful initial step, as in the example.
 ## How it works
 
 The optimizer and all model updates execute in one Mojo compilation unit.
-NumPy owns the contiguous Float64 input, workspace, and result metadata buffers.
-Their addresses and element counts cross a small C ABI as 64-bit integers.
-Mojo validates the counts and non-null addresses before reconstructing typed
-pointers.
+NumPy owns the contiguous Float64 input and one combined workspace/metadata
+allocation. Their addresses and element counts cross a small C ABI as 64-bit
+integers. Mojo validates the counts and non-null addresses before reconstructing
+typed pointers.
 Matrices use the upstream column-major flat layout so the translated indexing
 and update order remain recognizable.
 
 Python turns the objective into a thin C-ABI callback with `ctypes`. Mojo calls
 that pointer directly for each trial point; no C or C++ production shim is
-involved. The owned contiguous NumPy parameter buffer is reused directly as the
-read-only callback view instead of rebuilding a ctypes/NumPy wrapper on every
-evaluation. The binding keeps every NumPy buffer and the callback alive for the
-entire native call, rejects lossy complex and large-integer inputs, and
+involved. The owned contiguous NumPy parameter array is made read-only and
+passed directly to every callback instead of allocating a ctypes/NumPy wrapper
+or a second view. The binding keeps every NumPy buffer and the callback alive
+for the entire native call, rejects lossy complex and large-integer inputs, and
 propagates callback exceptions. Function evaluation count and final objective
-return in a three-element metadata buffer.
+occupy the last three elements of the combined native storage allocation.
 
-Trial-vector formation uses native-width Float64 SIMD with a scalar remainder.
-Numerically sensitive reductions retain their original scalar accumulation
-order. CPU threading is intentionally not used: the measured dimensions are
-small, and the larger loops either update shared model state or feed immediate
-reductions, so thread-launch overhead would dominate. A GPU path is also
-intentionally omitted. The core kernels are matrix-vector and rank-update
-operations with arithmetic intensity well below two floating-point operations
-per byte, interleaved with sequential trust-region decisions and Python
-callbacks; device transfer and launch overhead would make them slower.
+Trial-vector formation, interpolation-matrix rotations, rank updates, AXPY
+operations, and sufficiently long dot products use native-width Float64 SIMD
+with scalar remainder loops. Interpolation sets shorter than 32 elements stay
+scalar; this avoids SIMD setup overhead and preserves the small-problem
+trajectory. CPU threading is intentionally not used: the profiled dimensions
+are small, and the larger loops either update shared model state or feed
+immediate trust-region decisions, so thread-launch overhead would dominate. A
+GPU path is also intentionally omitted. The core kernels are matrix-vector and
+rank-update operations with arithmetic intensity well below two floating-point
+operations per byte, interleaved with sequential trust-region decisions and
+Python callbacks; device transfer and launch overhead would make them slower.
 
 Parity tests compile an exact copy of the bundled upstream header in
 `tests/reference/upstream_newuoa.h` and compare final parameters, objective
 values, evaluation-budget behavior, constant and ill-conditioned objectives,
 the default interpolation set, and every valid custom interpolation count for
 small dimensions. Boundary tests cover short native buffers, SIMD remainder
-dimensions, input narrowing, non-finite values, callback lifetime/view
+dimensions, input narrowing, non-finite values, callback lifetime/buffer
 behavior, and exception propagation. Intermediate paths can diverge slightly
 because the C++ and Mojo compilers contract floating-point operations
 differently; assertions are scaled to the requested final trust-region radius.
@@ -125,10 +127,11 @@ callback cost. The reference is the bundled upstream C++ header compiled with
 
 | Benchmark | Upstream C++ (ms) | Mojo (ms) | Speedup | C++/Mojo nfev |
 |---|---:|---:|---:|---:|
-| Rosenbrock 2D | 1.077 | 1.470 | 0.73x | 184/184 |
-| Chained Rosenbrock 8D | 13.435 | 21.497 | 0.62x | 699/681 |
-| Dense quadratic 16D | 7.486 | 13.398 | 0.56x | 299/299 |
+| Rosenbrock 2D | 1.017 | 1.323 | 0.77x | 184/178 |
+| Chained Rosenbrock 8D | 13.837 | 14.317 | 0.97x | 699/668 |
+| Dense quadratic 16D | 6.712 | 8.119 | 0.83x | 299/299 |
 
 On this run, the Mojo/Python binding is slower than the optimized C++ reference
-in all three cases. These timings include the same Python callback path on both
-sides; they are reproducibility data, not a general speed claim.
+in all three cases, though the 8D case is near parity. These timings include the
+same Python callback path on both sides; they are reproducibility data, not a
+general speed claim.
