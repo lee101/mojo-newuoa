@@ -451,7 +451,9 @@ def _update(
             )
             bi += W
         while bi < jp + 1:
-            bmat[bi + column] += tempa * vlag[bi] + tempb * w[bi]
+            bmat[bi + column] = (
+                bmat[bi + column] + tempa * vlag[bi] + tempb * w[bi]
+            )
             bi += 1
         for i in range(npt, jp + 1):
             bmat[jp + (i - npt) * ndim] = bmat[i + column]
@@ -1161,8 +1163,10 @@ def _newuob(
                         w[i] = sumv * xpt[k + i * npt] + tempq * xopt[i]
                         var ip = npt + i
                         for j in range(i + 1):
-                            bmat[ip + j * ndim] += (
-                                vlag[i] * w[j] + w[i] * vlag[j]
+                            bmat[ip + j * ndim] = (
+                                bmat[ip + j * ndim]
+                                + vlag[i] * w[j]
+                                + w[i] * vlag[j]
                             )
                 for k in range(nptm):
                     sumz = 0.0
@@ -1195,7 +1199,7 @@ def _newuob(
                         if i < j:
                             gq[j] += hq[ih] * xopt[i]
                         gq[i] += hq[ih] * xopt[j]
-                        hq[ih] += w[i] * xopt[j] + xopt[i] * w[j]
+                        hq[ih] = hq[ih] + w[i] * xopt[j] + xopt[i] * w[j]
                         bmat[npt + i + j * ndim] = bmat[npt + j + i * ndim]
                         ih += 1
                 for j in range(n):
@@ -1324,7 +1328,8 @@ def _newuob(
                         temp *= 0.5
                     vquad += temp * hq[ih]
                     ih += 1
-            vquad += _dot(npt, pq, w)
+            for k in range(npt):
+                vquad += pq[k] * w[k]
             diff = f - fopt - vquad
             diffc = diffb
             diffb = diffa
